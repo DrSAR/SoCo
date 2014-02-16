@@ -10,6 +10,7 @@ from the Sonos Zones
 from __future__ import print_function
 import sys
 import socket
+import string
 import requests
 import circuits # using Component, Debugger
 import circuits.web # using Server, Controller
@@ -35,20 +36,29 @@ def _get_local_ip():
 
 class Root(circuits.web.Controller):
     def index(self, *args, **kwargs):
-        rdata = self.request.body.read()
-        # the various ways of unescapeing XML give slightly varying results
-        # in this case, neither xml.sax.saxutils.unescape nor other scheme
-        # were able to produce xml-parseable text
-        p = HTMLParser.HTMLParser()
-        bdy = p.unescape(rdata)
-        root = ET.fromstring(bdy)
-        # The TransportState may be 'PLAYING', 'TRANSITIONING',
-        # 'PAUSED_PLAYBACK', and some more
-        TransportState = root.findall('.//d:TransportState', 
-                                      namespaces={'d':'urn:schemas-upnp-org:metadata-1-0/AVT/'})
-        print(TransportState[0].attrib['val'])
+        # retrieve XML from request body sent by zoneplayer
+        outer = ET.fromstring(self.request.body.read())
+        # TODO: check whether LastChange elements in the XML are really the only
+        # thing we could be conceivably interested in
+        eventxml_string = outer.findall('.//LastChange')[0].text
+        event_tree = ET.fromstring(eventxml_string)
+        event_attributes = {}
+        # TODO iterate through all InstanceID elements
+        # currently this will only look through the first InstanceID (which happens
+        # to be a child of 'Event' which happens to be a child of 'LastChange')
+        for el in event_tree.getchildren()[0].getchildren():
+            localtag = string.split(el.tag[1:], "}", 1)[1]
+            event_attributes[localtag] = el.attrib['val']
+        self.fire(Notification(event_attributes))
         # if we do not want to get unsubscribed, we send '200 OK'
         return "200 OK"
+
+class Notification(circuits.Event):
+    '''used to signal the arrival of UPnP event'''
+
+class CustomHandling(circuits.Component):
+    def Notification(self, event_dic):
+        print(event_dic)
 
 class App(circuits.Component):
     """An App for creation and subscription to Sonos notifications
@@ -89,11 +99,12 @@ class App(circuits.Component):
         # Raise an exception if we get back a non-200 from the zoneplayer/speaker.
         r.raise_for_status()
 
-        self.server = (circuits.web.Server((ip, self.port)) + Root()).register(self)
+        self.server = (circuits.web.Server((ip, self.port)) + Root() +
+                       CustomHandling()).register(self)
 
 def main(ip = None):
     app = App(ip)
-    #circuits.Debugger().register(app)
+    circuits.Debugger(events=False).register(app)
     app.run()
 
 
